@@ -5,6 +5,8 @@ import matplotlib.pylab as pylab
 import seaborn as sns
 from bokeh.plotting import figure, output_notebook, show
 import os
+import re
+import glob
 
 # Import custom functions
 import sys
@@ -25,41 +27,73 @@ else:
 
 #%% Parameters
 
+# Working directory
+os.chdir(os.path.join(base_dir, 'PNOC'))
+
 # Recording parameters
-fps = 5
-min_frame = 60*fps
-epoch_frame = min_frame*fps
-bin_frame = 1
-min_bin = min_frame / bin_frame
+frame_max = 4496                            # Number of frames to truncate data at
+fps = 5                                     # Number of frames in a second
+min_frame = 60*fps                          # Number of frames in a minute **NOT user-defined**
+base_frame = min_frame * 1                  # Number of frames during baseline period
+bin_frame = 1                               # Number of frames per bin
+min_bin = min_frame / bin_frame             # Number of bins per minute **NOT user-difined**
+response_bin = min_bin * 1                  # Number of bins during response period
+response_frames = response_bin * bin_frame  # Number of frames during response period **NOT user-defined**
+
+# Directories
+sig_dirs = glob.glob('PNOC Traces_Odor/PNOC*')
+ev_dirs = glob.glob('PNOC Events_Odor/PNOC*')
 
 # Plotting parameters
-pylab.rcParams['figure.figsize'] = 16, 9
-sns.set_style('dark')
+sns.set_context('talk')
 color_ctrl = 'gray'
-color_tmt = 'seagreen'
-color_exc = 'cadetblue'
+color_tmt = 'darkorange'
+color_exc = 'red'
+color_inh = 'blue'
 
 
 #%% Import data
 
-all = np.array([])
-count = 0
-for path, subdirs, files in os.walk('PNOC Traces_Odor'):
-    for name in files:
-        data = np.load(os.path.join(path, name))
-        data = data[:, :4496]
-        if all.any(): all = np.append(all, data, axis=0)
-        else: all = data
+# Import signal
+sig_id_ord = [re.split('_|\.', os.path.split(sig_dir)[-1], 1)[0] for sig_dir in sig_dirs]
+sigs_import = [np.load(os.path.join(sig_dir, 'extractedsignals.npy')) for sig_dir in sig_dirs]
+sig_frame_num = np.min([x.shape[1] for x in sigs_import])
+sig_file_num = len(sigs_import)
 
-num_cells, num_frames = all.shape
+# Import events
+#ev_id_ord = [re.split('_|\.', os.path.split(ev_dir)[-1], 1)[0] for ev_dir in ev_dirs]
+#evs_import = [np.load(os.path.join(ev_dir, 'extractedsignals.npy')) for ev_dir in ev_dirs]      # *** Make sure directory is correct **
+#ev_frame_num = np.min([x.shape[1] for x in sigs_import])
+#ev_file_num = len(evs_import)
+
+# Check
+#if sig_frame_num != ev_frame_num:
+#    raise UserWarning("Number of frames between signal and event files do not match.")
+#if sig_file_num != ev_file_num:
+#    raise UserWarning("Number of files between signal and event files do not match.")
+
+# Truncate signal and events so all have the same number of frames
+sigs_list = [sig[:, :frame_max] for sig in sigs_import]
+#evs_list = [ev[:, :frame_max] for ev in evs_import]
+
+# Number of neurons per subject
+num_cells_per_subj = [x.shape[0] for x in sigs_list]
+#if [x.shape[0] for x in evs_list] != num_cells_per_subj:
+#    raise UserWarning("Number of cells in each file is not consistent between signal and events.")
+cell_subj_id = [np.array(num_cells * [sig_id]) for num_cells, sig_id in zip(num_cells_per_subj, sig_id_ord)]
+
+# Reshape arrays into one matrix
+sigs = np.concatenate(sigs_list, axis=0)
+sigs_id = np.concatenate(cell_subj_id, axis=0)
+sig_ts = np.arange(sig_frame_num, dtype=float) / fps
+
+#events = np.concatenate(evs_list, axis=0)
 
 # Print output
-print "{0} cells found with {1} frames.".format(num_cells, num_frames)
+print "{} cells found from {} subjects.".format(sum(num_cells_per_subj), sig_file_num)
 
 
 #%% Organize data
-
-base_frame = min_frame * 1
 
 ax_stim = 0
 ax_cell = 1
@@ -68,28 +102,33 @@ ax_time = 2
 h2o = 0
 tmt = 1
 
-epochs = np.stack((all[:, :1450], all[:, 1499:2949], all[:, 2998:4448]), axis=ax_stim)
-num_cells = epochs.shape[ax_cell]
-num_frames = epochs.shape[ax_time]
+sig_epochs = np.stack((sigs[:, :1450], sigs[:, 1499:2949], sigs[:, 2998:4448]), axis=ax_stim)
+#ev_epochs = np.stack(())
+num_cells = sig_epochs.shape[ax_cell]
+num_frames = sig_epochs.shape[ax_time]
 
 # Data before and after water and TMT stimuli (stimulus x neuron x time)
-base = epochs[:2, :, -base_frame:]
-post = epochs[1:, :, :]
-data = np.concatenate((base, post), axis=ax_time)
+sig_base = sig_epochs[:2, :, -base_frame:]
+sig_post = sig_epochs[1:, :, :]
+sig_data = np.concatenate((sig_base, sig_post), axis=ax_time)
+
+#ev_base = ev_epochs[:2, :, -base_frame:]
+#ev_post = ev_epochs[1:, :, :]
+#ev_data = np.concatenate((ev_base, ev_post), axis=ax_time)
 
 # Bin data
 # Number of frames in 'base' and 'post' MUST be multiple of 'bin_frames'
-data_binned_raw = data.reshape((2, num_cells, -1, bin_frame))
-# if not np.array_equal(data_binned_raw[1, 4, :, :].flatten(), data[1, 4, :]): print "Binning error"
-data_binned_raw = data_binned_raw.mean(axis=3)
+data_binned_raw = sig_data.reshape((2, num_cells, -1, bin_frame)).mean(axis=3)
 num_bins = data_binned_raw.shape[ax_time]
 
 # Calculate z scores
 base_bin = base_frame / bin_frame
-base_binned_avg = data_binned_raw[:, :, :base_bin].mean(axis=ax_time, keepdims=True)
-base_binned_std = data_binned_raw[:, :, :base_bin].std(axis=ax_time, keepdims=True)
-data_binned_z = (data_binned_raw - base_binned_avg.repeat(num_bins, axis=ax_time)) / base_binned_std.repeat(num_bins, axis=ax_time)
+data_binned_z = zscore_base(data_binned_raw, base_bin, axis=2)
 
+# Count event rate (per min)
+#events_rates = np.concatenate(ev_data[:, :, :base_bin].mean(axis=ax_time) * min_frame,
+#                              ev_data[:, :, base_bin:].mean(axis=ax_time) * min_frame,
+#                              axis=ax_time)                                             # **CHECK THIS**
 
 #%% Plot data
 
@@ -118,29 +157,8 @@ cax = fig.add_axes([0.95, 0.1, 0.03, 0.8])
 cbar = fig.colorbar(im, cax=cax)
 cbar.set_label("Calcium z-score")
 
-# As line plots
-x = np.arange(num_bins) - base_bin + 1
-y = data_binned_z
-ybnd = [np.floor(y.min()), np.ceil(y.max())]
-
-fig, ax  = plt.subplots(2, 1)
-titles = ["Water response", "TMT response"]
-colors = ['gray', 'seagreen']
-
-for i in range(2):
-    for c in range(num_cells):
-        ax[i].plot(x, y[i, c, :], colors[i], alpha=0.3)
-        ax[i].axvline(x=0, linestyle='--', color='w')
-        
-        ax[i].set_title(titles[i], fontsize=20)
-        ax[i].set_ylabel("Calcium z score")
-        ax[i].set_ylim(ybnd)
-        ax[i].set_xlim([x[0], x[-1]])
-
 
 #%% Average data
-
-response_bin = min_bin * 1
 
 # Average response trace (stimulus x bins)
 data_trace_avg_z = data_binned_z.mean(axis=ax_cell)
@@ -151,9 +169,6 @@ data_trace_sem_z = stats.sem(data_binned_z, axis=ax_cell)
 data_response_avg_z = np.stack((data_binned_z[:, :, base_bin-response_bin:base_bin].mean(axis=ax_time), 
                                 data_binned_z[:, :, base_bin:base_bin+response_bin].mean(axis=ax_time)),
                                axis=ax_time)
-# data_response_sem_z = np.stack((stats.sem(data_binned_z[:, :, base_bin-response_bin:base_bin], axis=ax_time), 
-#                                 stats.sem(data_binned_z[:, :, base_bin:response_bin], axis=ax_time)),
-#                                axis=ax_time)
 
 
 #%% Plot averages
@@ -192,6 +207,8 @@ ax_bar.set_xlim([0, 2])
 ax_bar.set_xticks(np.arange(2) + 0.5)
 ax_bar.set_xticklabels(('Pre', 'Post'), fontsize=20)
 
+# Average events
+
 
 #%% Distribution of average responses
 
@@ -199,6 +216,7 @@ h2o_response_distro = np.histogram(data_response_avg_z[0, :, 1], bins=50, range=
 tmt_response_distro = np.histogram(data_response_avg_z[1, :, 1], bins=50, range=(-4, 10))
 
 # As cumulative distribution
+plt.figure()
 y0 = np.cumsum(h2o_response_distro[0], dtype='float64')/num_cells
 y1 = np.cumsum(tmt_response_distro[0], dtype='float64')/num_cells
 x0 = h2o_response_distro[1][:-1]
@@ -209,6 +227,7 @@ plt.ylabel("Cumulative proportion", fontsize=20)
 plt.xlabel("Response (z score)", fontsize=20)
 
 # As histogram
+plt.figure()
 y0 = h2o_response_distro[0]
 y1 = tmt_response_distro[0]
 x0 = h2o_response_distro[1][:-1]
@@ -232,7 +251,7 @@ for stimulus in range(2):
 p_05_ij = np.where(p_vals < 0.05)
 
 alpha = 0.05
-sig_diff_ix = bh_correction(p_vals.flatten(), alpha=alpha)
+sig_diff_ix = bh_correction(p_vals.flatten(), alpha=alpha)  # **flatten() goes down last axis first (opposite of Matlab)
 
 # Classify as excitatory or inhibitory
 # Excitatory neurons are those with an increase in response from pre- and post-stimulus
@@ -294,13 +313,14 @@ tmt_inh_response_avg_z = data_response_avg_z[:, tmt_inh_cells, :]
 #%% Plot averages by classification
 
 # Average traces - TMT exc during both stimuli
+plt.figure()
 ax_trace = plt.subplot2grid((1, 4), (0, 0), colspan=3)
 
 x = np.arange(num_bins) - base_bin
-y1 = tmt_inh_trace_avg_z[h2o, :]
-y2 = tmt_inh_trace_avg_z[tmt, :]
-e1 = tmt_inh_trace_sem_z[h2o, :]
-e2 = tmt_inh_trace_sem_z[tmt, :]
+y1 = tmt_exc_trace_avg_z[h2o, :]
+y2 = tmt_exc_trace_avg_z[tmt, :]
+e1 = tmt_exc_trace_sem_z[h2o, :]
+e2 = tmt_exc_trace_sem_z[tmt, :]
 
 plt.plot(x, y1, color_ctrl, x, y2, color_exc)
 plt.xlim([x[0], x[-1]])
@@ -314,7 +334,7 @@ w = 0.3
 left = 0.2
 x = np.arange(2) + left
 
-y = tmt_inh_response_avg_z.mean(axis=ax_cell)
+y = tmt_exc_response_avg_z.mean(axis=ax_cell)
 y0 = y[0, :]
 y1 = y[1, :]
 e = stats.sem(tmt_inh_response_avg_z, axis=ax_cell)
@@ -329,6 +349,32 @@ ax_bar.set_xlim([0, 2])
 ax_bar.set_xticks(np.arange(2) + 0.5)
 ax_bar.set_xticklabels(('Baseline', 'Stimulus'))
 
+# Calcium events
+plt.figure()
+
+all_cells = np.arange(num_cells)
+tmt_ne_cells = all_cells[~np.in1d(all_cells, sig_diff_ix - num_cells)]  # subtract by num_cells since tmt index adds num_cells when flattened
+
+w = 0.2
+x0 = np.arange(2)
+x1 = np.arange(2) + w
+x2 = np.arange(2) + 2*w
+y0 = event_rates[1, tmt_ne_cells, :]
+y1 = event_rates[1, tmt_exc_cells, :]
+y2 = event_rates[1, tmt_inh_cells, :]
+e0 = stats.sem(event_rates[1, tmt_ne_cells, :])
+e1 = stats.sem(event_rates[1, tmt_exc_cells, :]
+e2 = stats.sem(event_rates[1, tmt_inh_cells, :]
+error_config = {'ecolor': '0.3'}
+
+plt.figure()
+plt.bar(x0, y0, w, color=color_ctrl, yerr=e0, error_kw=error_config)
+plt.bar(x1, y1, w, color=color_exc, yerr=e1, error_kw=error_config)
+plt.bar(x2, y2, w, color=color_inh, yerr=2, error_kw=error_config)
+ax_bar.set_xlim([0, 2])
+ax_bar.set_xticks(np.arange(2) + 0.5)
+ax_bar.set_xticklabels(('Baseline', 'Stimulus'))
+
 # Distribution
 # Distribution (cumulative histogram) of average responses - TMT excited
 h2o_response_distro = np.histogram(tmt_inh_response_avg_z[0, :, 1], bins=50, range=(-4, 10))
@@ -338,6 +384,8 @@ y0 = np.cumsum(h2o_response_distro[0], dtype='float64')/tmt_inh_response_avg_z.s
 y1 = np.cumsum(tmt_response_distro[0], dtype='float64')/tmt_inh_response_avg_z.shape[1]
 x0 = h2o_response_distro[1][:-1]
 x1 = tmt_response_distro[1][:-1]
+
+plt.figure()
 plt.plot(x0, y0, color_ctrl, x1, y1, color_exc)
 plt.title("Distribution of response to stimuli (Water vs TMT) in TMT-excited cells", fontsize=30)
 plt.ylabel("Cumulative proportion", fontsize=20)
