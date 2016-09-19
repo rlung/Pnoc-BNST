@@ -4,9 +4,12 @@ import numpy as np
 from scipy import stats
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
 import glob
 import os
 import re
+from functools import partial
 import statsmodels.formula.api as smf
 from statsmodels.sandbox.regression.predstd import wls_prediction_std
 from datetime import datetime
@@ -31,6 +34,9 @@ else:
     
 #%% Parameters
 
+# Define if events or fluorescence data
+event_data = False
+
 sig_fps = 5
 time_label = 'Recording_time'
 
@@ -44,8 +50,10 @@ os.chdir(os.path.join(base_dir, 'PNOC'))
 
 # Data directories
 behav_files = glob.glob('PNOC_EPM_Behavior/*.xlsx')
-sig_dirs = glob.glob('PNOC Traces_EPM/PNOC*')
-ev_dirs = glob.glob('PNOC Events_EPM/PNOC*')
+if event_data:
+    sig_dirs = glob.glob('PNOC Events_EPM/PNOC*')
+else:
+    sig_dirs = glob.glob('PNOC Traces_EPM/PNOC*')
 
 # Directory to save data
 now = datetime.now()
@@ -68,10 +76,6 @@ behav_id_ord = [re.split('_|\.', file, 1)[0] for file in file_names]
 sig_id_ord = [re.split('_|\.', os.path.split(sig_dir)[-1], 1)[0] for sig_dir in sig_dirs]
 sigs_import = [np.load(os.path.join(sig_dir, 'extractedsignals.npy')) for sig_dir in sig_dirs]
 sig_frame_num = np.min([x.shape[1] for x in sigs_import])
-#%%
-# Import events
-ev_id_ord = [re.split('_|\.', os.path.split(ev_dir)[-1], 1)[0] for ev_dir in ev_dirs]
-evs_import = [np.load(os.path.join(ev_dir, 'extractedsignals.npy')) for ev_dir in ev_dirs]      # *** Make sure directory is correct **
 
 
 #%% Format data
@@ -93,7 +97,6 @@ for x in np.arange(file_num):
 
 # Truncate signal and events so all have the same number of frames
 sigs_list = [sig[:, :sig_frame_num] for sig in sigs_import]
-#evs_list = [ev[:, :sig_frame_num] for ev in evs_import]
 
 # Number of neurons per subject
 num_cells_per_subj = [x.shape[0] for x in sigs_list]
@@ -104,15 +107,16 @@ sigs = np.concatenate(tuple(sigs_list), axis=0)
 sigs_id = np.concatenate(tuple(cell_subj_id), axis=0)
 sig_ts = np.arange(sig_frame_num, dtype=float) / sig_fps
 
-# Normalize (z score)
-sigs_z = map(stats.zscore, sigs)
-sigs_z = np.column_stack(sigs_z).T  # WATCH OUT FOR THE TRANSPOSE!!!
+# Normalize signal
+if event_data:
+    cell_std = np.std(sigs, axis=1, keepdims=True)
+    sigs_z = sigs / cell_std.repeat(sig_frame_num,axis=1)
+else:
+    sigs_z = map(stats.zscore, sigs)
+    sigs_z = np.column_stack(sigs_z).T  # WATCH OUT FOR THE TRANSPOSE!!!
 
-# Reshape array of events into one matrix
-#events = np.concatenate(tuple(evs_list), axis=0)
 
-
-#%% Create new behavioral data
+#%% Create new behavioral data (for EPM)
 
 data_norm2 = list(data_norm)  # copy list
 
@@ -253,15 +257,16 @@ for d in np.arange(len(data_norm2)):
                                                     open2close))
 
 # Add labels of new variables
-labels2 = labels + ['closed_arm_entrance',
-                    'closed_arm_exit',
-                    'open_arm_entrance',
-                    'open_arm_exit',
-                    'closed_to_open_transition',
-                    'open_to_closed_transition']
+labels_final = labels + ['closed_arm_entrance',
+                         'closed_arm_exit',
+                         'open_arm_entrance',
+                         'open_arm_exit',
+                         'closed_to_open_transition',
+                         'open_to_closed_transition']
 
 
 #%% Downsample to match calcium imaging time
+# NOTE: data_ds is var x time (row-major order)
 
 data_ds = []
 
@@ -269,12 +274,12 @@ for d in np.arange(file_num):
    # Find matching "bin" in calcium imaging time for each time point of behavioral data
    bin_ix = np.digitize(data_norm2[d][:, time_ix], sig_ts)
    
-   data_ds.append(np.nan * np.zeros((sig_frame_num, len(labels2)), dtype=float))
+   data_ds.append(np.nan * np.zeros((len(labels_final), sig_frame_num), dtype=float))
    # Downsample
    for dbin in np.arange(sig_frame_num):
        bin_pts = np.where(bin_ix == dbin+1)[0]
        if bin_pts.size:
-           data_ds[d][dbin, :] = np.mean(data_norm2[d][bin_pts, :], axis=0)
+           data_ds[d][:, dbin] = np.mean(data_norm2[d][bin_pts, :], axis=0)
     
 
 #%% GLM - Clean and select data
@@ -287,8 +292,8 @@ selected_behavs = ['Velocity',
                    'Mobility_stateMobile',
                    'Mobility_stateImmobile',
                    'Distance_to_zone',
-                   'close2open_transition',
-                   'open2close_transition']
+                   'closed_to_open_transition',
+                   'open_to_closed_transition']
 other_vars = ['Distance_to_zone * In_zoneOpen_arms__centerpoint',
               'Distance_to_zone * In_zoneClosed_arms__centerpoint']
 num_vars = len(selected_behavs) + len(other_vars) + 3
@@ -303,7 +308,7 @@ for d in np.arange(len(data_ds)):
 #    valid_behav_ix = np.ones(len(selected_behavs.shape, dtype=bool))
 #    print "Behaviral variables chosen are:"
 #    for n, behav in enumerate(selected_behavs):
-#        if np.any(data_ds[d][valid_frames[d], labels2.index(behav)]):
+#        if np.any(data_ds[d][valid_frames[d], labels_final.index(behav)]):
 #            print " + " + behav
 #        else:
 #            print " - " + behav + ": chosen but does not vary, thus omitted"
@@ -317,6 +322,7 @@ for d in np.arange(len(data_ds)):
 
 #%% GLM - Model
 
+plt.ioff()
 plot_dir = os.path.join(save_dir, 'plots')
 if not os.path.isdir(plot_dir):
     os.makedirs(plot_dir)
@@ -332,8 +338,7 @@ for cell in np.arange(num_cells):
     subj_ix = behav_id_ord.index(sig_subj_id)
     
     # Behavioral data
-    df = pd.DataFrame(data=data_ds[subj_ix][:, valid_frames[subj_ix]].T, columns=labels2)
-#    pdb.set_trace()
+    df = pd.DataFrame(data=data_ds[subj_ix][:, valid_frames[subj_ix]].T, columns=labels_final)
 #    df = sm.add_constant(df)
 
     # Setup variables    
@@ -363,16 +368,16 @@ for cell in np.arange(num_cells):
     ax[0].plot(model.fittedvalues, 'r-')
     ax[0].plot(iv_l, 'r--')
     ax[0].plot(iv_u, 'r--')
-    ax[0].set_title("Model")
-    ax[0].set_ylabel("Fluorescence")
+    ax[0].set_ylabel("Model (& observed) fluorescence")
+    ax[0].xaxis.set_visible(False)
     
     ax[1].plot(df['signal'] - model.fittedvalues, 'g-')
-    ax[1].set_title("Residual")
     ax[1].set_ylabel("Fluoresence residual")
     ax[1].set_xlabel("Time")
 
     plt.savefig(os.path.join(plot_dir, str(cell) + '.png'),
                 dpi=200, bbox_inches='tight')
+    plt.close()
 
 np.savetxt(os.path.join(save_dir, 'r_sq.txt'), r_sq)
 np.savetxt(os.path.join(save_dir, 'p_values.txt'), p_vals)
@@ -400,12 +405,34 @@ dir_mask[pos_sig_mask] = 1
 dir_mask[neg_sig_mask] = -1
 
 
-#%% Event focused - Create windows for arm transitions for one animal
+#%% Plot coefficients
+from mpl_toolkits.mplot3d import Axes3D
+
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+colors = ['blue', 'gray', 'red']
+ref = 11 # color coded by closed to open
+
+for cell_response in [-1, 0, 1]:
+    mask = dir_mask[:, ref] == cell_response
+    x0 = coeffs[mask, 11] # closed to open
+    x1 = coeffs[mask, 12] # open to closed
+    x2 = coeffs[mask, 13] # distance into open arm
+    
+    ax.scatter(x0, x1, x2, c=colors[cell_response+1], s=50)
+
+ax.set_xlabel("Closed to open")
+ax.set_ylabel("Open to closed")
+ax.set_zlabel("Distance into open arm")
+plt.show()
+
+
+#%% Event focused - Create windows for arm transitions for one animal (for EPM)
 
 animal = 0  # animal number
 animal_ix = sigs_id == sig_id_ord[animal]
 sigs_animal = sigs_z[animal_ix, :]
-evs_animal = events[animal_ix, :]
+num_cells, num_frames = sigs_animal.shape
 
 pre_frame_num = 25
 post_frame_num = 25
@@ -413,7 +440,7 @@ frame_dur = 0.2  # Time between frame starts
 
 all_data = data_ds[animal]
 
-var_names = labels2
+var_names = labels_final
 
 # Index variables
 close2open_ix = var_names.index('closed_to_open_transition')
@@ -424,122 +451,136 @@ to_close_ix = var_names.index('closed_arm_entrance')
 to_open_ix = var_names.index('open_arm_entrance')
 
 # Index frames
-close2open_frames = all_data[:, close2open_ix] > 0
-open2close_frames = all_data[:, open2close_ix] > 0
-close_exit_frames_all = all_data[:, from_close_ix] > 0
-open_exit_frames_all = all_data[:, from_open_ix] > 0
-close_enter_frames_all = all_data[:, to_close_ix] > 0
-open_enter_frames_all = all_data[:, to_open_ix] > 0
+close2open_frames = all_data[close2open_ix, :] > 0
+open2close_frames = all_data[open2close_ix, :] > 0
+close_exit_frames_all = all_data[from_close_ix, :] > 0
+open_exit_frames_all = all_data[from_open_ix, :] > 0
+close_enter_frames_all = all_data[to_close_ix, :] > 0
+open_enter_frames_all = all_data[to_open_ix, :] > 0
 
+# Events during transition
+# eg, close_exit_frames are frames where subject exits closed arm during 
+# closed=to-open arm transitions
 close_exit_frames = np.logical_and(close_exit_frames_all, close2open_frames)
 open_exit_frames = np.logical_and(open_exit_frames_all, open2close_frames)
 close_enter_frames = np.logical_and(close_enter_frames_all, open2close_frames)
 open_enter_frames = np.logical_and(open_enter_frames_all, close2open_frames)
 
 # Create and plot arm transition windows
-if np.any(close_exit_frames):
-    
-    # Create windows around arm transitions
-    pre_close2open = np.stack([sigs_animal[:, ix-pre_frame_num:ix] for ix in np.where(close_exit_frames)[0]], axis=-1)
-    post_close2open = np.stack([sigs_animal[:, ix:ix+post_frame_num] for ix in np.where(open_enter_frames)[0]], axis=-1)
-    pre_close2open_avg_trace = pre_close2open.mean(axis=2)
-    post_close2open_avg_trace = post_close2open.mean(axis=2)
-    
-    # **CHECK THIS** #
-    pre_close2open_events = np.stack([evs_animal[:, ix-pre_frame_num:ix] for ix in np.where(close_exit_frames)[0]], axis=-1)
-    post_close2open_events = np.stack([evs_animal[:, ix:ix+post_frame_num] for ix in np.where(open_enter_frames)[0]], axis=-1)
-    pre_close2open_events_cell_avgs = pre_close2open.mean(axis=1)
-    post_close2open_events_cell_avgs = post_close2open.mean(axis=1)
-    pre_close2open_event_avg = pre_close2open_events_cell_avgs.mean(axis=1)
-    post_close2open_event_avg = post_close2open_events_cell_avgs.mean(axis=1)
-    # **CHECK THIS** #
-    
-    # Plot data from all cells
-    fig, ax = plt.subplots(1, 2)
-    ax[0].pcolormesh(pre_close2open_avg_trace)
-    ax[1].pcolormesh(post_close2open_avg_trace)
 
-    # Plot exampe trace
-    cell = 0   # example cell to plot
-    fig, ax = plt.subplots(1, 2)
+exit_frames = [close_exit_frames, open_exit_frames]
+enter_frames = [open_enter_frames, close_enter_frames]
+transition = ["Closed-to-open", "Open-to-closed"]
 
-    x0 = np.arange(0, -pre_frame_num, -1) * frame_dur
-    x1 = np.arange(post_frame_num) * frame_dur
-    y0 = pre_close2open_avg_trace.mean(axis=0)
-    y1 = post_close2open_avg_trace.mean(axis=0)
-    e0 = stats.sem(pre_close2open_avg_trace, axis=0)
-    e1 = stats.sem(post_close2open_avg_trace, axis=0)
-    ymax = np.amax(np.concatenate((y0, y1))) + np.amax(np.concatenate((e0, e1)))
-    ymin = np.amin(np.concatenate((y0, y1))) - np.amin(np.concatenate((e0, e1)))
+for tt in np.arange(2):
+    if np.any(exit_frames[tt]):
+        
+        # Create windows around arm transitions
+        pre_sig = np.stack([sigs_animal[:, ix-pre_frame_num:ix] for ix in np.where(exit_frames[tt])[0]], axis=-1)
+        post_close2open = np.stack([sigs_animal[:, ix:ix+post_frame_num] for ix in np.where(enter_frames[tt])[0]], axis=-1)
+        
+        # Average time series response
+        pre_sig_trial_avg = pre_sig.mean(axis=2)
+        post_sig_trial_avg = post_close2open.mean(axis=2)
+        
+        # Average epoch response per cell
+        pre_sig_epoch_avg = pre_sig_trial_avg.mean(axis=1)
+        post_sig_epoch_avg = post_sig_trial_avg.mean(axis=1)
+        
+        
+        # Plot
+        fig = plt.figure()
+        gs = gridspec.GridSpec(2, 3)
+        cell = 0   # example cell to plot
+        color_pre = 'lightsteelblue'
+        color_post = 'steelblue'
+        c_palette = sns.color_palette([color_pre, color_post])
+        
+        # Plot data from all cells (averaged over trials)
+        x0, y0 = np.meshgrid(np.arange(0, -(pre_frame_num+1), -1) * frame_dur,
+                             np.arange(num_cells+1))
+        x1, y1 = np.meshgrid(np.arange(post_frame_num+1) * frame_dur,
+                             np.arange(num_cells+1))
+        max_z = np.concatenate((pre_sig_trial_avg.flatten(),
+                                post_sig_trial_avg.flatten())).max()
+        min_z = np.concatenate((pre_sig_trial_avg.flatten(),
+                                post_sig_trial_avg.flatten())).min()
+        
+        ax_pre_cmap = plt.subplot(gs[0, 0])
+        ax_pre_cmap.set_title("{} transitions".format(labels[tt]))
+        im_pre = ax_pre_cmap.pcolormesh(x0, y0, pre_sig_trial_avg)
+        im_pre.set_clim([min_z, max_z])
+        ax_pre_cmap.set_ylabel("Cells")
+        ax_pre_cmap.set_xlabel('Pre')
+        
+        ax_post_cmap = plt.subplot(gs[0, 1])
+        im_post = ax_post_cmap.pcolormesh(x1, y1, post_sig_trial_avg)
+        im_post.set_clim([min_z, max_z])
+        ax_post_cmap.yaxis.set_visible(False)
+        ax_post_cmap.set_xlabel("Post")
     
-    ax[0].plot(x0, y0)
-    ax[0].fill_between(x0, y0-e0, y0+e0, alpha=0.3)
-    ax[0].set_title('Pre (closed)')
-    ax[0].set_ylabel('Fluorescence value')
-    ax[0].set_ylim(ymin, ymax)    
-
-    ax[1].plot(x1, y1)
-    ax[1].fill_between(x1, y1-e1, y1+e1, alpha=0.3)
-    ax[1].set_title('Post (open)')
-    ax[1].set_ylim(ymin, ymax)
-    
-    # Plot events
-    x = np.arange(2)
-    y = [pre_close2open_event_avg, post_close2open_event_avg]
-    e = [stats.sem(pre_close2open_events_cell_avgs, axis=1),
-         stats.sem(post_close2open_events_cell_avgs, axis=1)]
-    
-    error_config = {'ecolor': '0.3'}
-    plt.figure()
-    plt.bar(x, y, w, yerr=e, error_kw=error_config)
-
-if np.any(open_exit_frames):
-    
-    pre_open2close = np.stack([sigs_animal[:, ix-pre_frame_num:ix] for ix in np.where(open_exit_frames)[0]], axis=-1)
-    post_open2close = np.stack([sigs_animal[:, ix:ix+post_frame_num] for ix in np.where(close_enter_frames)[0]], axis=-1)
-    
-    pre_open2close_cell_avg = pre_open2close.mean(axis=2)
-    post_open2close_cell_avg = post_open2close.mean(axis=2)
-
-    # Plot data from all cells
-    fig, ax = plt.subplots(1, 2)
-    ax[0].pcolormesh(pre_open2close_cell_avg)
-    ax[1].pcolormesh(post_open2close_cell_avg)
-
-    # Plot exampe trace
-    cell = 0   # example cell to plot
-    fig, ax = plt.subplots(1, 2)
-
-    x0 = np.arange(0, -pre_frame_num, -1) * frame_dur
-    x1 = np.arange(post_frame_num) * frame_dur
-    y0 = pre_open2close_cell_avg.mean(axis=0)
-    y1 = post_open2close_cell_avg.mean(axis=0)
-    e0 = stats.sem(pre_open2close_cell_avg, axis=0)
-    e1 = stats.sem(post_open2close_cell_avg, axis=0)
-    ymax = np.amax(np.concatenate((y0, y1))) + np.amax(np.concatenate((e0, e1)))
-    ymin = np.amin(np.concatenate((y0, y1))) - np.amin(np.concatenate((e0, e1)))
-    
-    ax[0].plot(x0, y0)
-    ax[0].fill_between(x0, y0-e0, y0+e0, alpha=0.3)
-    ax[0].set_title('Pre (open)')
-    ax[0].set_ylabel('Fluorescence value')
-    ax[0].set_ylim(ymin, ymax)    
-
-    ax[1].plot(x1, y1)
-    ax[1].fill_between(x1, y1-e1, y1+e1, alpha=0.3)
-    ax[1].set_title('Post (closed)')
-    ax[1].set_ylim(ymin, ymax)
-    
-np.savetxt(os.path.join(save_dir, 'MID_open2close_open.txt'), pre_open2close_cell_avg, delimiter = '\t')
-np.savetxt(os.path.join(save_dir, 'MID_open2close_close.txt'), post_open2close_cell_avg, delimiter = '\t')
-np.savetxt(os.path.join(save_dir, 'MID_close2open_close.txt'), pre_close2open_cell_avg, delimiter = '\t')
-np.savetxt(os.path.join(save_dir, 'MID_close2open_open.txt'), post_close2open_cell_avg, delimiter = '\t')
+        # Plot average (for example cell)
+        x0 = np.arange(0, -pre_frame_num, -1) * frame_dur
+        x1 = np.arange(post_frame_num) * frame_dur
+        y0 = pre_sig_trial_avg.mean(axis=0)
+        y1 = post_sig_trial_avg.mean(axis=0)
+        e0 = stats.sem(pre_sig_trial_avg, axis=0)
+        e1 = stats.sem(post_sig_trial_avg, axis=0)
+        ymax = np.amax(np.concatenate((y0, y1))) + np.amax(np.concatenate((e0, e1)))
+        ymin = np.amin(np.concatenate((y0, y1))) - np.amin(np.concatenate((e0, e1)))
+        
+        ax_pre_sig = plt.subplot(gs[1, 0])
+        ax_pre_sig.plot(x0, y0, color_pre)
+        ax_pre_sig.fill_between(x0, y0-e0, y0+e0,
+                                facecolor=color_pre, alpha=0.3)
+        ax_pre_sig.set_ylabel('Fluorescence value')
+        ax_pre_sig.set_ylim(ymin, ymax)    
+        ax_pre_sig.set_xlabel('Pre')
+        
+        ax_post_sig = plt.subplot(gs[1, 1])
+        ax_post_sig.plot(x1, y1, color_post)
+        ax_post_sig.fill_between(x1, y1-e1, y1+e1,
+                                facecolor=color_post, alpha=0.3)
+        ax_post_sig.set_ylim(ymin, ymax)
+        ax_post_sig.yaxis.set_visible(False)
+        ax_post_sig.set_xlabel('Post')
+        
+        # Plot average pre/post
+        w = 0.8
+        x = np.arange(2)
+        y = [pre_sig_epoch_avg.mean(),
+             post_sig_epoch_avg.mean()]
+        e = [stats.sem(pre_sig_epoch_avg),
+             stats.sem(pre_sig_epoch_avg)]
+        
+        ax_avg_sig = plt.subplot(gs[1, 2])
+        error_config = {'ecolor': '0.3'}
+        ax_avg_sig.bar(x-w/2, y, yerr=e, error_kw=error_config,
+                  fill=False)
+        sns.swarmplot(np.repeat(x, num_cells),
+                      np.concatenate([pre_sig_epoch_avg, post_sig_epoch_avg]),
+                      ax=ax_avg_sig,
+                      palette=c_palette)
+        ax_avg_sig.set_title("Average response")
+        ax_avg_sig.set_ylim(ymin, ymax)
+        ax_avg_sig.yaxis.set_visible(False)
+        ax_avg_sig.set_xticklabels(('Pre', 'Post'))
+        
+        gs.tight_layout(fig)
+        
+        # Save data
+        if event_data:
+            data_type = "events"
+        else:
+            data_type = "traces"
+        np.savetxt(os.path.join(save_dir, '{}_transitions_{}.txt'.format(transition[tt], data_type)),
+                   post_sig_trial_avg, delimiter = '\t')
 
 
 #%% Calculate preference index
 
-closed_ix = var_names.index('In zone(Closed arms / center-point)')
-open_ix = var_names.index('In zone(Open arms / center-point)')
+open_col = labels.index('In_zoneOpen_arms__centerpoint')
+closed_col = labels.index('In_zoneClosed_arms__centerpoint')
 
 pref_index_avg = [[]] * file_num
 pref_index_ev = [[]] * file_num
@@ -547,8 +588,8 @@ pref_index_avg_p = [[]] * file_num
 pref_index_ev_p = [[]] * file_num
 for f in np.arange(file_num):
     cell_ix = np.where(sig_id == f)[0]
-    closed_frames = data_ds[f][closed_ix, :] > 0
-    open_frames = data_ds[f][open_ix, :] > 0
+    closed_frames = data_ds[f][closed_col, :] > 0
+    open_frames = data_ds[f][open_col, :] > 0
     
     sig_temp = sigs_animal[cell_ix, :]
     sig_closed = sig_temp[:, closed_frames]
@@ -570,4 +611,4 @@ for f in np.arange(file_num):
 
 x = data_ds[0][2, :]
 y = data_ds[0][3, :]
-c, _ = activity_map(x, y, sigs_animal[0, :], binsize=0.25, plot=True, sigma=2)
+c, _ = activity_map(x, y, sigs_animal[0, :], binsize=0.025, plot=True, sigma=2)
