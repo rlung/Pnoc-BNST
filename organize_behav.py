@@ -14,11 +14,11 @@ from argparse import ArgumentParser, RawTextHelpFormatter
 import custom
 import pupilize
 
+import pdb
+
 
 def manage_data(data, n_cores=1, threshold=127, sample_period=200, key='cam/frames', time_limit=300000):
-    '''Create pupil dataframe from file
-
-    '''
+    '''Create pupil dataframe from file'''
     global df
     epoch_dict = {'1': 'base', '2': 'ctrl', '3': 'stim'}
 
@@ -32,30 +32,34 @@ def manage_data(data, n_cores=1, threshold=127, sample_period=200, key='cam/fram
         pupil_timestamps = hf[os.path.dirname(key) + '/timestamps']
 
         # Calculate pupil diameter
-        pfunc = partial(pupilize.find_pupil, threshold=threshold, kernel=np.ones((7, 7)))
+        pfunc = partial(pupilize.find_pupil, threshold=threshold, morph_kernel=np.ones((7, 7)))
         if n_cores > 1:
             p = multi.Pool(processes=n_cores)
             boxes, _ = zip(*p.map(pfunc, pupil_frames))
         else:
             boxes, _ = zip(*map(pfunc, pupil_frames))
+        np.savetxt(os.path.splitext(data)[0] + '.csv', boxes, delimiter=',')
         pupil_diam = [w for _, _, w, _ in boxes]
 
         # Resample data
         # ts_max = min(time_limit, int(pupil_timestamps[-1]))
         # ts_new = np.arange(0, ts_max, sample_period)
         ts_new = np.array(df.index.levels[1])
-        # pupil_resampled = custom.resample(pupil_diam, pupil_timestamps, ts_new, method=np.mean)
-        pupil_resampled = scipy.interpolate.interp1d(pupil_timestamps, pupil_diam)(ts_new)
+        pupil_resampled = custom.resample(pupil_diam, pupil_timestamps, ts_new, method=np.mean)
+        # bad_ix = np.isnan(pupil_diam)
+        # pupil_timestamps = pupil_timestamps[~bad_ix]
+        # pupil_diam = pupil_diam[~bad_ix]
+        # pupil_resampled = scipy.interpolate.interp1d(pupil_timestamps, pupil_diam)(ts_new)
 
         behav = hf['behavior']
         trials = custom.resample(
-            np.ones(behav['trials'].shape), behav['trials'], ts_new, method=np.any)
+            np.ones(behav['trials'].shape), behav['trials'], ts_new, empty_bin=0, method=np.any)
         rail_home = custom.resample(
-            np.ones(behav['rail_home'].shape), behav['rail_home'], ts_new, method=np.any)
+            np.ones(behav['rail_home'].shape), behav['rail_home'], ts_new, empty_bin=0, method=np.any)
         rail_leave = custom.resample(
-            np.ones(behav['rail_leave'].shape), behav['rail_leave'], ts_new, method=np.any)
+            np.ones(behav['rail_leave'].shape), behav['rail_leave'], ts_new, empty_bin=0, method=np.any)
         track = custom.resample(
-            behav['track'][1], behav['track'][0], ts_new, method=np.sum)
+            behav['track'][1], behav['track'][0], ts_new, empty_bin=0, method=np.sum)
 
     # Save data
     col_name = (animal_id, plane, order)
@@ -65,24 +69,6 @@ def manage_data(data, n_cores=1, threshold=127, sample_period=200, key='cam/fram
     df.set_value(epoch_dict[epoch], col_name + ('rail_home', ), rail_home)
     df.set_value(epoch_dict[epoch], col_name + ('rail_leave', ), rail_leave)
     df.set_value(epoch_dict[epoch], col_name + ('track', ), track)
-
-    # df.set_value(ix0, col_name, pupil_resampled)
-    # if df is None:
-    #     series = {col_name: pupil_resampled}
-    #     df = pd.DataFrame(
-    #         series,
-    #         index=pd.MultiIndex.from_tuples(
-    #             zip([epoch] * len(ts_new), ts_new)
-    #         )
-    #     )
-    # else:
-    #     df[col_name, epoch] = pupil_resampled
-
-    # save_file = '{}_{}_{}.txt'.format(animal_id, exp_day, epoch)
-    # np.savetxt(save_file, pupil_diam)
-    # print("Saved data to {}".format(save_file))
-
-    print('Finished')
 
 
 def main():
